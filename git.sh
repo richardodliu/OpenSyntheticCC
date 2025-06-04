@@ -1,11 +1,16 @@
-# 进入当前脚本所在的目录
+# change to the directory of the script
 path=$(dirname $0)
 echo $path
 cd $path
 
-# 添加所有文件
+# add all files
 git add .
 
-# 提交并推送到远程仓库
-git -c user.name="richardodliu" -c user.email="richardodliu@gmail.com" commit -am "update"
+# read name and email
+name="richardodliu"
+email="richardodliu@gmail.com"
+message="update"
+
+# commit and push to remote repository
+git -c user.name="$name" -c user.email="$email" commit -am "$message"
 git push origin main
