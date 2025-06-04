@@ -17,11 +17,10 @@ OpenSyntheticCC is a repository for fine-tuning language models on synthetic Cha
    git clone https://github.com/your-username/OpenSyntheticCC.git
    cd OpenSyntheticCC
    ```
-2. Install dependencies (Python 3.8+, PyTorch, Transformers, Datasets, DeepSpeed, etc.):
+2. Install dependencies:
    ```bash
-   pip install torch transformers datasets deepspeed
+   pip install -r requirements.txt
    ```
-   > Note: There is no requirements.txt, please install dependencies manually.
 
 ## Usage
 
