@@ -26,6 +26,7 @@ OpenSyntheticCC is a repository for fine-tuning language models on synthetic Cha
 
 ### 1. Prepare your dataset
 - Format: JSONL, each line should contain `instruction` and `response` fields.
+- **Note:** Due to privacy reasons, the dataset is not open-sourced for now. In the future, we will release scripts for generating synthetic datasets.
 
 ### 2. Fine-tune a model
 - Edit `sft.sh` to set your model path, data path, and output directory.
