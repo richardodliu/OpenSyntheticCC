@@ -13,6 +13,8 @@ import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
+from finetune_tokenzier import transfer_tokenzier
+
 def build_instruction_prompt(instruction: str, tokenizer):
     messages = [
         {"role": "user", "content": instruction}
@@ -111,6 +113,8 @@ def train():
         trust_remote_code=True
     )
 
+    tokenizer = transfer_tokenzier(tokenizer)
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -126,13 +130,23 @@ def train():
     config.use_cache = False
     config.attn_implementation = "flash_attention_2"
     config.max_position_embeddings = training_args.model_max_length if training_args.model_max_length > config.max_position_embeddings else config.max_position_embeddings
-    config.torch_dtype = torch.bfloat16
+    config.dtype = torch.bfloat16
     config.trust_remote_code = True
+
+    config.bos_token_id = tokenizer.bos_token_id
+    config.eos_token_id = tokenizer.eos_token_id
+    config.pad_token_id = tokenizer.pad_token_id
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path = model_args.model_name_or_path,
         config = config
     )
+
+    if hasattr(model, "generation_config"):
+        model.generation_config.bos_token_id = tokenizer.bos_token_id
+        model.generation_config.eos_token_id = tokenizer.eos_token_id
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+        model.generation_config.max_new_tokens = training_args.model_max_length
 
     if training_args.local_rank == 0:
         print('='*100)
@@ -146,6 +160,19 @@ def train():
         split="train",
         cache_dir=training_args.cache_dir
     )
+
+    if training_args.local_rank == 0:        
+        example = raw_train_datasets[0]
+        messages = [
+            {"role": "user", "content": example['instruction']}
+        ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        print('='*100)
+        print("Example prompt:")
+        print(prompt)
+        print("Example response:")
+        print(example['response'])
+
     if training_args.local_rank > 0: 
         torch.distributed.barrier()
         
@@ -160,6 +187,7 @@ def train():
 
     if training_args.local_rank == 0:
         torch.distributed.barrier()
+        print('='*100)
         print("Training dataset samples:", len(train_dataset))
 
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
