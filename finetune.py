@@ -29,23 +29,25 @@ def train_tokenize_function(example, tokenizer):
     instruction_tokens = tokenizer.encode(
         build_instruction_prompt(example['instruction'], tokenizer),
         max_length = tokenizer.model_max_length,
-        truncation = True,
+        truncation = False,
         add_special_tokens = True
     )
 
-    if instruction_tokens[-1] == tokenizer.eos_token_id:
+    if instruction_tokens and instruction_tokens[-1] == tokenizer.eos_token_id:
         instruction_tokens = instruction_tokens[:-1]
 
     response_tokens = tokenizer.encode(
         example['response'],
         max_length = tokenizer.model_max_length,
-        truncation = True,
+        truncation = False,
         add_special_tokens = False
     )
 
     response_tokens.append(tokenizer.eos_token_id)
 
     return dict(
+        total_tokens = len(instruction_tokens) + len(response_tokens),
+        supervised_tokens = max(0, min(len(response_tokens), tokenizer.model_max_length - len(instruction_tokens))),
         input_ids = (instruction_tokens + response_tokens)[:tokenizer.model_max_length],
         labels = ([torch.nn.CrossEntropyLoss().ignore_index] * len(instruction_tokens) + response_tokens)[:tokenizer.model_max_length]
     )
@@ -78,10 +80,13 @@ class DataCollatorForSupervisedDataset(object):
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default = None)
+    attention_backend: str = field(default="sdpa")
 
 @dataclass
 class DataArguments:
     data_path: str = field(default=None, metadata={"help": "Path to the training data."})
+    preprocessing_num_workers: int = field(default=4)
+    reject_truncated: bool = field(default=True)
 
 
 @dataclass
@@ -98,7 +103,7 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     training_args.gradient_checkpointing_kwargs = {'use_reentrant' : False}
-    training_args.save_only_model = True
+    training_args.save_only_model = False
     training_args.torch_empty_cache_steps = 1
     
     if training_args.local_rank == 0:
@@ -128,7 +133,7 @@ def train():
     # 修改配置并加载模型
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
     config.use_cache = False
-    config.attn_implementation = "flash_attention_2"
+    config._attn_implementation = model_args.attention_backend
     config.max_position_embeddings = training_args.model_max_length if training_args.model_max_length > config.max_position_embeddings else config.max_position_embeddings
     config.dtype = torch.bfloat16
     config.trust_remote_code = True
@@ -139,7 +144,9 @@ def train():
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path = model_args.model_name_or_path,
-        config = config
+        config = config,
+        attn_implementation = model_args.attention_backend,
+        torch_dtype = torch.bfloat16
     )
 
     if hasattr(model, "generation_config"):
@@ -173,23 +180,32 @@ def train():
         print("Example response:")
         print(example['response'])
 
-    if training_args.local_rank > 0: 
+    if torch.distributed.is_initialized() and training_args.local_rank > 0: 
         torch.distributed.barrier()
         
     train_dataset = raw_train_datasets.map(
         train_tokenize_function,
-        num_proc = 32,
+        num_proc = data_args.preprocessing_num_workers,
         remove_columns = raw_train_datasets.column_names,
         load_from_cache_file = True, # not args.overwrite_cache
         desc = "Running Encoding",
         fn_kwargs = {"tokenizer" : tokenizer}
     )
 
-    if training_args.local_rank == 0:
+    if torch.distributed.is_initialized() and training_args.local_rank == 0:
         torch.distributed.barrier()
         print('='*100)
         print("Training dataset samples:", len(train_dataset))
 
+    original_rows = len(train_dataset)
+    train_dataset = train_dataset.filter(
+        lambda row: row['supervised_tokens'] > 0 and (
+            not data_args.reject_truncated or row['total_tokens'] <= training_args.model_max_length
+        ), desc="Reject empty or truncated supervision"
+    )
+    print(f"Retained {len(train_dataset)} / {original_rows} rows after token checks", flush=True)
+    if not len(train_dataset):
+        raise ValueError("No valid supervised training rows")
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     data_module = dict(
         train_dataset = train_dataset, 
@@ -197,9 +213,10 @@ def train():
         data_collator = data_collator
     )
 
-    trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    trainer = Trainer(model=model, processing_class=tokenizer, args=training_args, **data_module)
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+    trainer.save_model(training_args.output_dir + "/final")
 
     # trainer.save_model(training_args.output_dir + "/checkpoint-9999")
     trainer.save_state()
